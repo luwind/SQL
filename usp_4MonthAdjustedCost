@@ -1,0 +1,295 @@
+USE [finEnergyMgmt]
+GO
+/****** Object:  StoredProcedure [dbo].[usp_4MonthAdjustedCost]    Script Date: 9/13/2016 10:01:28 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+-- =============================================
+-- Author:		FENG LU
+-- Create date: 4/3/2013
+-- Description:	<Description,,>
+-- =============================================
+ALTER PROCEDURE [dbo].[usp_4MonthAdjustedCost]
+  @Month  int,
+  @year  int
+AS
+BEGIN
+	-- SET NOCOUNT ON added to prevent extra result sets from
+	-- interfering with SELECT statements.
+	SET NOCOUNT ON;
+
+Declare @mydate as datetime
+Declare @NumOfDay as int
+
+--Set @Month=5
+--Set @Year=2015
+
+Set @mydate=convert(datetime, Convert(varchar,@month) + '-' + Convert(varchar,1) + '-' + Convert(varchar,@year) ) ;
+Set @NumOfDay=  datediff(day, @mydate, dateadd(month, 1, @mydate))  --- Calculate how many days in that month
+----print @NumOfDay;
+declare @NG_Per_kwh as float
+declare @NG_CAPACITY as float
+declare @NG_MFCP as float
+
+
+
+SELECT @NG_Per_kwh = [SUPPLY_ADJUSTMENT_PER_KWH]   --- removed flat Merchant Function Charge on NG 
+      ,@NG_CAPACITY=[CAPACITY_PER_KW]
+  FROM [UTILITY_OTHER_RATES] where [UTILITY_ID]=1 and [Year]=@Year and [Month]=@Month
+
+
+declare @NYSEG_Per_kwh as float
+declare @NYSEG_ANCILLARY as float
+declare @NYSEG_Capacity as float
+
+SELECT @NYSEG_Per_kwh = ([MERCHANT_FUNCTION_CHARGE_PER_KWH] + [SUPPLY_ADJUSTMENT_PER_KWH])
+      ,@NYSEG_ANCILLARY=ANCILLARY_SERVICES_PER_KWH
+	  ,@NYSEG_Capacity= CAPACITY_PER_KW
+  FROM [UTILITY_OTHER_RATES] where [UTILITY_ID]=2 and [Year]=@Year and [Month]=@Month
+
+declare @OR_Per_kwh as float
+declare @OR_ANCILLARY as float
+declare @OR_Capacity as float
+
+SELECT @OR_Per_kwh = ([MERCHANT_FUNCTION_CHARGE_PER_KWH] + [SUPPLY_ADJUSTMENT_PER_KWH])
+      ,@OR_ANCILLARY=ANCILLARY_SERVICES_PER_KWH
+	  ,@OR_Capacity= CAPACITY_PER_KW
+  FROM [UTILITY_OTHER_RATES] where [UTILITY_ID]=3 and [Year]=@Year and [Month]=@Month
+
+declare @Centrl_Hud_Per_kwh as float
+declare @Centrl_Hud_ANCILLARY as float
+declare @Centrl_Hud_Capacity as float
+
+SELECT @Centrl_Hud_Per_kwh = ([MERCHANT_FUNCTION_CHARGE_PER_KWH] + [SUPPLY_ADJUSTMENT_PER_KWH])
+      ,@Centrl_Hud_ANCILLARY=ANCILLARY_SERVICES_PER_KWH
+	  ,@Centrl_Hud_Capacity= CAPACITY_PER_KW
+  FROM [UTILITY_OTHER_RATES] where [UTILITY_ID]=4 and [Year]=@Year and [Month]=@Month
+
+declare @startdate  datetime
+declare @enddate  datetime
+
+if (@Month >=5)
+begin
+
+Set @startdate=convert(datetime, Convert(varchar,5) + '-' + Convert(varchar,1) + '-' + Convert(varchar,@year) ) ;
+Set @enddate=convert(datetime, Convert(varchar,4) + '-' + Convert(varchar,30) + '-' + Convert(varchar,@year+1) ) ;
+
+end
+else
+
+begin
+Set @startdate=convert(datetime, Convert(varchar,5) + '-' + Convert(varchar,1) + '-' + Convert(varchar,@year-1) ) ;
+Set @enddate=convert(datetime, Convert(varchar,4) + '-' + Convert(varchar,30) + '-' + Convert(varchar,@year) ) ;
+end
+
+;
+With a as (
+Select VOLTAGE_LEVEL,SERVICE_CLASS,OGS_ZONE_ID, a.ACCOUNT_NUMBER,UTILITY_ID,[DATE],[HOUR], USAGE from dbo.ACCOUNT_METERED_DATA as a
+join account on account.ACCOUNT_NUMBER = a.ACCOUNT_NUMBER 
+Where Year(DATE)=@Year and Month(DATE)=@Month and date >=ACCOUNT_GO_LIVE_DATE
+and a.ACCOUNT_NUMBER in ( Select ACCOUNT_NUMBER from [dbo].[fn_GetAllActiveAcct](@year,@month))
+
+)
+
+----National grid
+ ,C1 as (
+----NationalGrid@1   Apply MERCHANT_FUNCTION_CHARGE_PER_KWH  
+----NationalGrid@2   Apply SUPPLY_ADJUSTMENT_PER_KWH 
+select  
+a.VOLTAGE_LEVEL,OGS_ZONE_ID, a.ACCOUNT_NUMBER,a.[DATE],a.[HOUR], USAGE,Rate_Per_kwh
+,(USAGE*Rate_Per_kwh)/1000 as Cost  ,(USAGE*@NG_Per_kwh) as Cost1  ,a.SERVICE_CLASS
+ from a 
+  join UTILITY_RATES_VOLTAGE_CLASS as b
+on a.VOLTAGE_LEVEL=b.VOLTAGE_LEVEL and a.[date]=b.[date] and a.[hour]=b.[hour] and a.OGS_ZONE_ID=b.ZONE_ID and a.UTILITY_ID=b.UTILITY_ID
+and a.SERVICE_CLASS=b.SERVICE_CLASS
+where a.UTILITY_ID=1 )
+,C as (
+---Apply Dynamic MFC on each account   (C1.usage* (F*[cost/usage]+C) = F* Cost + usage *C
+select  
+VOLTAGE_LEVEL,OGS_ZONE_ID, ACCOUNT_NUMBER,C1.[DATE],[HOUR], C1.USAGE,Rate_Per_kwh
+,(C1.USAGE*Rate_Per_kwh* F) /1000 + C1.USAGE*C
++ C1.cost 
+as cost
+,C1.SERVICE_CLASS
+
+from C1  
+left join  (Select * from fn_GetNG_MFC(@month,@year)) as C_fn on C_fn.DATE=c1.date and C_fn.ServiceClass=c1.SERVICE_CLASS
+)
+
+,D as (
+Select  distinct OGS_ZONE_ID,ACCOUNT_NUMBER, sum(Cost) over (partition by ACCOUNT_NUMBER ) as Cost  from C)
+,NG as (
+----NationalGrid@3 apply speclal adjustments
+Select   OGS_ZONE_ID,d.ACCOUNT_NUMBER, Cost* isnull(sl,1) as Cost  from D
+left join (Select * from dbo.fn_SpecialLossFactor (@year,@month,@NumOfDay)) as b on D.ACCOUNT_NUMBER = b.ACCOUNT_NUMBER
+union all
+ ----NationalGrid@4 Apply Capacity_Per_KWH 
+Select  OGS_ZONE_ID,ACCOUNT_ID,Cost*(isNull(P,1)) as Cost from fn_GetPeakCapacity(@year,@month,1,@startdate,@enddate,@NG_CAPACITY) as CP
+Left Join  dbo.fn_GetCapacityPercent(@mydate) as CP_Per on CP.ACCOUNT_ID= CP_Per.ACCOUNT_NUMBER
+where  ACCOUNT_ID in ( Select ACCOUNT_ID from dbo.COMPARISON_VALUES_BY_ACCOUNT  Where [Year] =@Year and [Month]=@Month)
+)
+-- End of National Grid
+
+---- NYSEG 
+,b as (
+Select a.*,SL from a 
+left join (Select * from dbo.fn_SpecialLossFactor (@year,@month,@NumOfDay)) as b on a.ACCOUNT_NUMBER = b.ACCOUNT_NUMBER
+where UTILITY_ID=2
+)
+
+,E as (
+Select ACCOUNT_NUMBER, VOLTAGE_LEVEL,UTILITY_ID,[Date],[Hour],OGS_ZONE_ID,usage,
+Case When SL is null then Usage 
+else Usage * SL   ---NYSEG@1 Apply Special Loss Factors
+end as UsageWithSpecialFactors
+from b )
+,F as ( ---NYSEG@2 Apply Standard Loss Factor
+Select distinct E.*,ADJUSTMENT_FACTOR,ADJUSTMENT_FACTOR *UsageWithSpecialFactors as UsageWithStandardFactor  from E join  
+dbo.SERVICE_CLASS_CALCULATION_FACTOR as d1 on E.UTILITY_ID=d1.UTILITY_ID and E.VOLTAGE_LEVEL=d1.VOLTAGE_LEVEL
+Where [Year]=@Year and [Month]=@Month 
+)
+
+,G as (  
+
+ Select F.*,ISO.ZONAL_LBMP,Loss from F  Join dbo.ISO_DAY_AHEAD_HOURLY_RATES as ISO
+on ISO.ZONE_ID=F.OGS_ZONE_ID and ISO.DATE=F.Date and ISO.HOUR=F.Hour
+Join (Select  UTILITY_ID,Voltage,Loss from fn_GetVoltageLossFactor(@mydate,2)) as V
+on F.VOLTAGE_LEVEL=V.VOLTAGE and F.UTILITY_ID=V.UTILITY_ID 
+)
+
+,H as (
+---NYSEG@3   Apply ISO_Day_Ahead_Hourly_Rate
+---NYSEG@4   Apply NYSEG Loss Percentage   -- Disabled
+Select  distinct OGS_ZONE_ID,ACCOUNT_NUMBER, 
+--sum(ZONAL_LBMP * Usage) over (partition by ACCOUNT_NUMBER )* (1+Loss/100)/1000  as Cost  from G
+sum(ZONAL_LBMP * UsageWithStandardFactor) over (partition by ACCOUNT_NUMBER ) /1000 as Cost  from G
+union all
+ ----NYSEG@5    Apply Capacity_Per_KWH
+Select  OGS_ZONE_ID,ACCOUNT_ID,Cost * Isnull(p,1) as Cost from fn_GetPeakCapacity(@year,@month,2,@startdate,@enddate,@NYSEG_Capacity)  as CP
+Left Join  dbo.fn_GetCapacityPercent(@mydate) as CP_Per on CP.ACCOUNT_ID= CP_Per.ACCOUNT_NUMBER
+where  ACCOUNT_ID in ( Select ACCOUNT_ID from dbo.COMPARISON_VALUES_BY_ACCOUNT  Where [Year] =@Year and [Month]=@Month)
+
+union all
+----NYSEG@6		Apply @NYSEG_Per_kwh on metered usage  (@NYSEG_Per_kwh+@NYSEG_ANCILLARY )
+----NYSEG@7      Apply @NYSEG_ANCILLARY on metered usage  (@NYSEG_Per_kwh+@NYSEG_ANCILLARY )
+Select distinct OGS_ZONE_ID,ACCOUNT_NUMBER,sum(usage) over (partition by ACCOUNT_NUMBER) * (@NYSEG_Per_kwh+@NYSEG_ANCILLARY) as Cost from a where UTILITY_ID=2
+
+)
+--- End of NYSEG
+----Orange&Rockland
+,ORb as (
+Select a.*,SL from a 
+left join (Select * from dbo.fn_SpecialLossFactor (@year,@month,@NumOfDay)) as b on a.ACCOUNT_NUMBER = b.ACCOUNT_NUMBER
+where UTILITY_ID=3
+)
+
+,ORE as (
+Select ACCOUNT_NUMBER, VOLTAGE_LEVEL,UTILITY_ID,[Date],[Hour],OGS_ZONE_ID,usage,
+Case When SL is null then Usage 
+else Usage * SL   ---OR@1 Apply Special Loss Factors
+end as UsageWithSpecialFactors
+from ORb )
+,ORF as ( ---OR@2 Apply Standard Loss Factor
+Select distinct ORE.*,ADJUSTMENT_FACTOR,ADJUSTMENT_FACTOR *UsageWithSpecialFactors as UsageWithStandardFactor  from ORE join  
+dbo.SERVICE_CLASS_CALCULATION_FACTOR as d1 on ORE.UTILITY_ID=d1.UTILITY_ID and ORE.VOLTAGE_LEVEL=d1.VOLTAGE_LEVEL
+Where [Year]=@Year and [Month]=@Month 
+)
+
+,ORG as (  
+
+ Select ORF.*,ISO.ZONAL_LBMP,Loss from ORF  Join dbo.ISO_DAY_AHEAD_HOURLY_RATES as ISO
+on ISO.ZONE_ID=ORF.OGS_ZONE_ID and ISO.DATE=ORF.Date and ISO.HOUR=ORF.Hour
+Join (Select  UTILITY_ID,Voltage,Loss from fn_GetVoltageLossFactor(@mydate,3)) as V
+on ORF.VOLTAGE_LEVEL=V.VOLTAGE and ORF.UTILITY_ID=V.UTILITY_ID 
+)
+
+,ORH as (
+---OR@3   Apply ISO_Day_Ahead_Hourly_Rate
+---OR@4   Apply O&R Loss Percentage   --- disabled
+Select  distinct OGS_ZONE_ID,ACCOUNT_NUMBER, 
+--sum(ZONAL_LBMP * Usage) over (partition by ACCOUNT_NUMBER )* (1+Loss/100)/1000  as Cost  from ORG
+sum(ZONAL_LBMP * UsageWithStandardFactor) over (partition by ACCOUNT_NUMBER )/1000  as Cost  from ORG
+union all
+ ----OR@5    Apply Capacity_Per_KWH
+Select  OGS_ZONE_ID,ACCOUNT_ID,Cost * Isnull(p,1) as Cost from fn_GetPeakCapacity(@year,@month,3,@startdate,@enddate,@OR_Capacity)  as CP
+Left Join  dbo.fn_GetCapacityPercent(@mydate) as CP_Per on CP.ACCOUNT_ID= CP_Per.ACCOUNT_NUMBER
+where  ACCOUNT_ID in ( Select ACCOUNT_ID from dbo.COMPARISON_VALUES_BY_ACCOUNT  Where [Year] =@Year and [Month]=@Month)
+
+union all
+----OR@6		Apply @OR_Per_kwh on metered usage  (@OR_Per_kwh+@OR_ANCILLARY )
+----OR@7      Apply @OR_ANCILLARY on metered usage  (@OR_Per_kwh+@OR_ANCILLARY )
+Select distinct OGS_ZONE_ID,ACCOUNT_NUMBER,sum(usage) over (partition by ACCOUNT_NUMBER) * (@OR_Per_kwh+@OR_ANCILLARY) as Cost from a where UTILITY_ID=3
+
+)
+---- end of Orange&Rockland
+
+---- Central Hudson
+,CHudb as (
+Select a.*,SL from a 
+left join (Select * from dbo.fn_SpecialLossFactor (@year,@month,@NumOfDay)) as b on a.ACCOUNT_NUMBER = b.ACCOUNT_NUMBER
+where UTILITY_ID=4
+)
+
+,CHudE as (
+Select ACCOUNT_NUMBER, VOLTAGE_LEVEL,UTILITY_ID,[Date],[Hour],OGS_ZONE_ID,usage,
+Case When SL is null then Usage 
+else Usage * SL   ---Centrl HUD@1 Apply Special Loss Factors
+end as UsageWithSpecialFactors
+from CHudb )
+,CHudF as ( ---Centrl HUD@2 Apply Standard Loss Factor
+Select distinct CHudE.*,ADJUSTMENT_FACTOR,ADJUSTMENT_FACTOR *UsageWithSpecialFactors as UsageWithStandardFactor  from CHudE join  
+dbo.SERVICE_CLASS_CALCULATION_FACTOR as d1 on CHudE.UTILITY_ID=d1.UTILITY_ID and CHudE.VOLTAGE_LEVEL=d1.VOLTAGE_LEVEL
+Where [Year]=@Year and [Month]=@Month 
+)
+
+,CHudG as (  
+
+ Select CHudF.*,ISO.ZONAL_LBMP,Loss from CHudF  Join dbo.ISO_DAY_AHEAD_HOURLY_RATES as ISO
+on ISO.ZONE_ID=CHudF.OGS_ZONE_ID and ISO.DATE=CHudF.Date and ISO.HOUR=CHudF.Hour
+Join (Select  UTILITY_ID,Voltage,Loss from fn_GetVoltageLossFactor(@mydate,4)) as V
+on CHudF.VOLTAGE_LEVEL=V.VOLTAGE and CHudF.UTILITY_ID=V.UTILITY_ID 
+)
+
+,CHudH as (
+---Centrl HUD@3   Apply ISO_Day_Ahead_Hourly_Rate
+---Centrl HUD@4   Apply Centrl HUD Loss Percentage   ---- disabled
+Select  distinct OGS_ZONE_ID,ACCOUNT_NUMBER, 
+--sum(ZONAL_LBMP * Usage) over (partition by ACCOUNT_NUMBER )* (1+Loss/100)/1000  as Cost  from CHudG
+sum(ZONAL_LBMP * UsageWithStandardFactor) over (partition by ACCOUNT_NUMBER )/1000  as Cost  from CHudG
+union all
+ ----Centrl HUD@5    Apply Capacity_Per_KWH
+Select  OGS_ZONE_ID,ACCOUNT_ID,Cost * Isnull(p,1) as Cost from fn_GetPeakCapacity(@year,@month,4,@startdate,@enddate,@Centrl_Hud_Capacity)  as CP
+Left Join  dbo.fn_GetCapacityPercent(@mydate) as CP_Per on CP.ACCOUNT_ID= CP_Per.ACCOUNT_NUMBER
+where  ACCOUNT_ID in ( Select ACCOUNT_ID from dbo.COMPARISON_VALUES_BY_ACCOUNT  Where [Year] =@Year and [Month]=@Month)
+
+union all
+----Centrl HUD@6		Apply @OR_Per_kwh on metered usage  (@Centrl_Hud_Per_kwh+@Centrl_Hud_ANCILLARY )
+----Centrl HUD@7      Apply @OR_ANCILLARY on metered usage   (@Centrl_Hud_Per_kwh+@Centrl_Hud_ANCILLARY )
+Select distinct OGS_ZONE_ID,ACCOUNT_NUMBER,sum(usage) over (partition by ACCOUNT_NUMBER) * (@Centrl_Hud_Per_kwh+@Centrl_Hud_ANCILLARY) as Cost from a where UTILITY_ID=4
+
+)
+--- end of Central Hudson
+,AllU as (
+-- Centrl_Hud
+Select distinct OGS_ZONE_ID,ACCOUNT_NUMBER, sum(Cost) over (partition by ACCOUNT_NUMBER ) as cost from ChudH
+union
+---OR
+Select distinct OGS_ZONE_ID,ACCOUNT_NUMBER, sum(Cost) over (partition by ACCOUNT_NUMBER ) as cost from ORH
+union
+---NYSEG
+Select distinct OGS_ZONE_ID,ACCOUNT_NUMBER, sum(Cost) over (partition by ACCOUNT_NUMBER ) as cost from H
+union
+-- National Grid
+Select distinct NG.OGS_ZONE_ID,NG.ACCOUNT_NUMBER, sum(Cost) over (partition by NG.ACCOUNT_NUMBER )  as Cost from  NG
+)
+Select [ISO_ZONE],AllU.OGS_ZONE_ID,AllU.ACCOUNT_NUMBER,[DESCRIPTION] as AcctName, Cost  * (1+ isnull(TARIFF_SURCHARGE_PERCENT,0)) as Cost from AllU
+Join account on account.ACCOUNT_NUMBER= AllU.ACCOUNT_NUMBER
+join [dbo].[ZONE_TRANSLATION] on [ZONE_TRANSLATION].[OGS_ZONE_ID]=AllU.OGS_ZONE_ID
+left join fn_GetTariff(@mydate) as T on T.ACCOUNT_ID=AllU.ACCOUNT_NUMBER   
+Order by AllU.OGS_ZONE_ID,[DESCRIPTION]
+
+
+END
+
