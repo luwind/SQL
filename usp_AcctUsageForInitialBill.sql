@@ -1,6 +1,6 @@
 USE [finEnergyMgmt]
 GO
-/****** Object:  StoredProcedure [dbo].[usp_AcctUsageForInitialBill]    Script Date: 7/3/2014 10:59:57 AM ******/
+/****** Object:  StoredProcedure [dbo].[usp_AcctUsageForInitialBill]    Script Date: 9/13/2016 10:04:33 AM ******/
 SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
@@ -110,6 +110,8 @@ union
 Select Account_ID,Peak_installed_capacity, ICAPGroup from dbo.fn_GetPeakCapacity(@year,@month,2,@startdate,@enddate,1)
 union
 Select Account_ID,Peak_installed_capacity , ICAPGroup from dbo.fn_GetPeakCapacity(@year,@month,3,@startdate,@enddate,1)
+union
+Select Account_ID,Peak_installed_capacity , ICAPGroup from dbo.fn_GetPeakCapacity(@year,@month,4,@startdate,@enddate,1)
 )
 ,FF as (
 Select distinct FF1.*, PEAK_INSTALLED_CAPACITY * isnull(P,1)  as ICAP_Initial,  isnull(P,1) as Per_ICAP, ICAPGroup from FF1 
@@ -122,9 +124,14 @@ left join fn_GetCapacityPercent(@mydate) as c on c.ACCOUNT_NUMBER=FF1.ACCOUNT_NU
 ,summary as (
 Select  UTILITY_ID,Account.DESCRIPTION ,FF.*,ISO_bill_Energy.Energy_Cost,
 sum(usage) over(Partition By FF.OGS_Zone_ID) as 'Total Zone Usage',
-round(usage/sum(usage) over(Partition By FF.OGS_Zone_ID),6) as 'Adjusted Percent Zone Usage',
+round(usage/sum(usage) over(Partition By FF.OGS_Zone_ID),8) as 'Adjusted Percent Zone Usage',
 sum(usage) over() as 'Total Usage', usage/ sum(usage) over () as 'Adjusted Percent Total Usage' 
-,@ancillary as ancillary_service, @adjustment as adjustment, @ICAP as installed_capacity,@ICAP_OR as installed_capacity_or
+,@ancillary as ancillary_service, @adjustment as adjustment, @ICAP as installed_capacity_1,@ICAP_OR as installed_capacity_or,
+case when ICAPGroup =1 then
+@ICAP
+ when ICAPGroup =2 then
+ @ICAP_OR
+end as installed_capacity
  from FF Join account on account.ACCOUNT_NUMBER = FF.ACCOUNT_NUMBER
 join ISO_bill_Energy on ISO_bill_Energy.ISO_Zone= FF.OGS_Zone_ID
 
@@ -137,11 +144,11 @@ Select b.ISO_ZONE,a.*, [Adjusted Percent Total Usage]*ancillary_service as ancil
 ICAP_Initial/Sum(ICAP_Initial) over(partition by ICAPGroup) as ICAPPercentage, ICAPGroup
 ,[Adjusted Percent Total Usage]*isnull(adjustment,0) as 'adjs', 
 
-case when ICAPGroup =1 then
-Energy_Cost *[Adjusted Percent Zone Usage]+ [Adjusted Percent Total Usage]*ancillary_service + [Adjusted Percent Total Usage]*adjustment + installed_capacity*ICAP_Initial/Sum(ICAP_Initial) over( partition by ICAPGroup) 
- when ICAPGroup =2 then
- Energy_Cost *[Adjusted Percent Zone Usage]+ [Adjusted Percent Total Usage]*ancillary_service + [Adjusted Percent Total Usage]*adjustment + installed_capacity_OR*ICAP_Initial/Sum(ICAP_Initial) over( partition by ICAPGroup) 
-end as initialSettlement
+--case when ICAPGroup =1 then
+Energy_Cost *[Adjusted Percent Zone Usage]+ [Adjusted Percent Total Usage]*ancillary_service + [Adjusted Percent Total Usage]*adjustment + installed_capacity*ICAP_Initial/Sum(ICAP_Initial) over( partition by ICAPGroup)  as initialSettlement
+-- when ICAPGroup =2 then
+-- Energy_Cost *[Adjusted Percent Zone Usage]+ [Adjusted Percent Total Usage]*ancillary_service + [Adjusted Percent Total Usage]*adjustment + installed_capacity_OR*ICAP_Initial/Sum(ICAP_Initial) over( partition by ICAPGroup) 
+--end as initialSettlement
 
  from summary as a  Join dbo.ZONE_TRANSLATION as b
 on a.OGS_ZONE_ID = b.OGS_ZONE_ID
