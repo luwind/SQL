@@ -1,0 +1,51 @@
+USE [finEnergyMgmt]
+GO
+/****** Object:  UserDefinedFunction [dbo].[fn_GetPeakCapacity]    Script Date: 9/13/2016 10:03:18 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+-- =============================================
+-- Author:		Feng Lu
+-- Create date: 3/5/2013
+-- Description:	<Description,,>
+-- =============================================
+ALTER FUNCTION [dbo].[fn_GetPeakCapacity]
+(	
+@Year int,
+@month int,
+@UTILITYID int,
+@startdate  datetime,
+@enddate  datetime,
+@rate float
+)
+RETURNS TABLE 
+AS
+RETURN 
+(
+
+--declare @mydate as datetime
+--Set @mydate=convert(datetime, Convert(varchar,@month) + '-' + Convert(varchar,1) + '-' + Convert(varchar,@year) ) 
+
+--- new capacity zone starts 05/01/2014
+
+Select [ACCOUNT_ID]
+      ,[DATE]
+      ,[HOUR]
+      ,[PEAK_INSTALLED_CAPACITY]
+      ,[DATE_START]
+      ,[DATE_END]
+      ,[ImportID]
+	  ,   'ICAPGroup'  = Case
+	  	
+	  when  ACCOUNT.UTILITY_ID  = 2 then 1
+	  when  ACCOUNT.UTILITY_ID  = 1 then 1
+		  when ACCOUNT.UTILITY_ID =3 and convert(datetime, Convert(varchar,@month) + '-' + Convert(varchar,1) + '-' + Convert(varchar,@year) )  >='5/1/2014'  then 2
+	  when ACCOUNT.UTILITY_ID =3 and convert(datetime, Convert(varchar,@month) + '-' + Convert(varchar,1) + '-' + Convert(varchar,@year) ) < '5/1/2014'  then 1
+	      When ACCOUNT.UTILITY_ID  = 4 then 2
+	  end 
+,@rate*PEAK_INSTALLED_CAPACITY as cost,OGS_ZONE_ID  from dbo.ISO_PEAK join dbo.ACCOUNT on ACCOUNT.ACCOUNT_NUMBER=ISO_PEAK.ACCOUNT_ID
+where DATE_START=@startdate and DATE_END=@enddate and ACCOUNT.UTILITY_ID=@UTILITYID
+and [ACCOUNT_ID] in (Select  ACCOUNT_NUMBER from [dbo].[fn_GetAllActiveAcct](@year,@month))
+
+)
